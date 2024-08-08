@@ -51,7 +51,27 @@ To keep track of the training progress, please check the `--log_dir`. This direc
 - `log.txt`: Additional information is logged in this file to aid in monitoring and troubleshooting.
 
 
+# Explainability
 
+## Text classification
+
+Note that the model explains its decisions by reporting the effect of each word on its decisions. Thus, one can easily see which words have the highest impact on its decisions.
+
+In the following, we visualize the most influential words on model's decisions for two data sets:
+- left: hyperpartisan
+- right: Reuters-8,
+
+
+![texts](explainability/texts.png)
+
+## Image-set classification
+
+In the following, we visualize the most influential images/pixels on the model decision for an example image-set from ETH-80 data set.
+- top: four images with the most impact (above numbers represent the impact of each image)
+- bottom: heatmaps encodes the influence of each pixel within images.
+
+   
+![Images](explainability/images.png)
 
 ## Reference:
 
