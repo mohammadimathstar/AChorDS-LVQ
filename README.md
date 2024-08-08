@@ -4,7 +4,7 @@ Welcome to the repository for AChorDS-LVQ!
 
 ## What is AChorDS-LVQ?
 
-It is a novel approach to image set classification, offering intrinsic interpretability. It treats each image set as a point on the Grassmann manifold, representing the set with a subspace derived through Singular Value Decomposition (SVD). During training, GRLGQ learns a collection of subspace prototypes and relevance factors. These prototypes capture typical behaviours within classes, while the relevance factors identify the most discriminative principal vectors or images crucial for the classification task.
+It is a novel approach to text classification and image-set classification, offering intrinsic interpretability. It treats each text/image-set as a point on the Grassmann manifold, representing the set with a subspace derived through Singular Value Decomposition (SVD). During training, GRLGQ learns a collection of subspace prototypes and relevance factors. These prototypes capture typical behaviours within classes, while the relevance factors identify the most discriminative principal vectors or words/images crucial for the classification task.
 
 ## Prerequisites
 
@@ -49,6 +49,8 @@ To keep track of the training progress, please check the `--log_dir`. This direc
 - `log_epoch_overview.csv`: This file provides a comprehensive overview of each epoch, including the test accuracy, mean training accuracy, and the mean loss.
 - `log_train_epochs_losses.csv`: Here, you'll find detailed information about the loss value and training accuracy for each batch iteration.
 - `log.txt`: Additional information is logged in this file to aid in monitoring and troubleshooting.
+
+
 
 
 ## Reference:
