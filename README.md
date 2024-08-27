@@ -78,7 +78,7 @@ In the following, we visualize the most influential images/pixels on the model d
 When citing our work, please refer to the following article:
 
 `
-TODO
+@article{mohammadi2024achordslvq, title={A prototype-based approach for set classification}, author={Mohammadi, M. and Ghosh, S.}, journal={arXiv preprint https://arxiv.org/abs/2408.13720}, year={2024} }
 `
 
 Please use this article as the primary reference for our methodology and approach. If you need further details or clarification, don't hesitate to reach out.
