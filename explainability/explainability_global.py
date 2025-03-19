@@ -1,0 +1,419 @@
+import os
+import sys
+import numpy as np
+import pandas as pd
+from utils_model import *
+from utilsembedding import *
+from wordcloud import WordCloud
+
+def return_model(fname):
+    with np.load(fname + '.npz', allow_pickle=True) as f:
+        xprotos, yprotos = f['xprotos'], f['yprotos']
+        lamda = f['lamda']
+#        print(f"train accuracy: {f['accuracy_of_train_set'][-1]}, "
+#              f"\t validation accuracy: {f['accuracy_of_validation_set'][-1]} ({np.max(f['accuracy_of_validation_set'])})")
+
+#        if 'conf_mat' in f.keys():
+#            print(f['conf_mat'])
+    return xprotos, yprotos, lamda
+
+def get_example_txt(idx: int, cls: int, label_col='label', fname: str='reuters-8-test.cvs'):
+    df = pd.read_csv(fname)
+    return df.loc[df[label_col] == cls, 'text'].tolist()[idx], df.loc[df[label_col] == cls, label_col].tolist()[idx]
+
+
+def doc_embedding(tokens: List[str], dim):
+    c = Counter(tokens)
+    words = [word for word in c.keys() if word in MODEL.index_to_key]
+    assert len(words) >= dim, f"the length of the text {len(words)} is lower than the dimensionality of the subspace {dim}"
+    words_emb = np.array([MODEL.get_vector(word) for word in words]).T
+    freq_words = np.array([c[word] for word in words])
+    return words, words_emb, freq_words
+    
+
+def get_subspace_of_doc(txt, dim=1):
+    print("Tokenize the corpus!")
+    doc_tokens = tokenizer([txt])[0]
+    print("Compute the doc embedding")
+    words, words_emb, freq = doc_embedding(doc_tokens, dim)
+    F = np.diag(np.sqrt(freq))
+    U, S, Vh = np.linalg.svd(words_emb @ F, full_matrices=False, compute_uv=True, hermitian=False)
+
+    word_impact_no_rot = F @ Vh[:dim, :].T @ np.diag(1 / S[:dim])
+    return U[:, :dim], words, words_emb, word_impact_no_rot
+
+def get_winner_prototypes(subspace_doc, label, xprotos, yprotos, rel, metric_type='geodesic'):
+    plus, minus = nearest_prototypes(subspace_doc, label, xprotos, yprotos, metric_type, relevance=rel)
+    return plus, minus
+
+def get_words_importance_all_dir(word_impact_no_rot, result: dict, rel: np.array):
+    """returns a (n x D) matrix: each row captures the importance of a word"""
+    return word_impact_no_rot @ result['Q'] @ np.diag(rel[0]) #changed
+
+def get_most_similar_word(vec, topn=10):
+    tmp = {
+        k: 100 * round(v, 3) for (k, v) in MODEL.most_similar(positive=[vec], negative=[], topn=topn)
+    }
+    return tmp
+
+def create_word_cloud(d, background_color='white'):
+    wc = WordCloud(background_color=background_color)
+    minD = np.min([n for n in d.values()])
+    if minD<=0:
+        d = {w: f - minD + 1 for w, f in d.items()}
+    wc.generate_from_frequencies(d)
+    return wc
+
+def plot_word_cloud(text, title="", fname="tmp", background_color='white'):
+
+    cloud = create_word_cloud(text, background_color=background_color) #for text in wc_texts]
+
+    fig, axes = plt.subplots(1, 1, figsize=(4, 2.5))
+    _ = axes.imshow(cloud, interpolation='bilinear')
+
+    _ = axes.grid(False)
+    _ = axes.axis('off')
+    plt.suptitle(title)
+    plt.tight_layout()
+    if True:
+        plt.savefig("../pics/top_words_%s.eps" % fname, dpi=150)
+    plt.show()
+    
+def get_word_importances(txt, label, dim, xprotos, yprotos, rel, weight_type, metric_type='geodesic', dic=None):
+    subspace, words, words_emb, word_imp_no_rot = get_subspace_of_doc(txt, dim)
+    plus, minus = get_winner_prototypes(subspace, label, xprotos, yprotos, rel, metric_type)
+
+    if plus['distance'] > minus['distance']:
+        t = 'misclassified'
+    else:
+        t = 'correct'
+
+    print(
+        f"""\n\t\t{t}: \t  {plus['distance']-minus['distance']}, 
+        normalized:    {(plus['distance']-minus['distance'])/(plus['distance']+minus['distance'])}"""
+    )
+
+    winners_type = ["positive", 'negative']
+    winners = [plus, minus]
+    word_importances_winners = []
+
+    for wtype, w in zip(winners_type, winners):
+        if dic is not None:
+            title = f"{wtype}: {dic[yprotos[w['index']]]}"
+        else:
+            title = f"{wtype}: {yprotos[w['index']]}"
+        print(title)
+	# CHECK: TODO: WHY  M should be word_imp_no_rot @ w['Q']
+        X, M = words_emb, word_imp_no_rot @ w['Q'] #NOTE: I have added @ w['Q'] today is 30 april 2024
+        W = X.T @ xprotos[w['index']] @ w['Qw']
+        if rel.shape[0] == 1:
+            txt_words_impact = rel * M * W
+        else:
+            txt_words_impact = np.expand_dims(rel[w['index']], axis=0) * M * W
+
+        if weight_type == 'abs':
+            txt_words_impact = np.abs(txt_words_impact)
+
+        p = txt_words_impact.sum(axis=1)
+        word_importances_winners.append(p)
+
+    # sort_idx = np.argsort(word_importance_diff)
+    # tmp = {words[i]: word_importance_diff[i] for i in sort_idx[-1:-num_of_words_text:-1]}
+
+    return word_importances_winners[0], word_importances_winners[1], words, yprotos[minus['index']]
+
+
+def get_top_words(words, positive_scores, negative_scores, num_of_top_words):
+    diff = positive_scores - negative_scores
+    sort_idx_pos = np.argsort(positive_scores)
+    sort_idx_neg = np.argsort(negative_scores)
+    sort_idx_diff = np.argsort(diff)
+    top_words = [(i, words[i]) for i in sort_idx_pos[-1:-num_of_top_words:-1]]
+    top_words.extend([(i, words[i]) for i in sort_idx_neg[-1:-num_of_top_words:-1]])
+    top_words.extend([(i, words[i]) for i in sort_idx_diff[-1:-num_of_top_words:-1]])
+    top_words_set = set(top_words)
+    print(f"There are {len(top_words_set)} distinct top words among {num_of_top_words} top words.")
+    dic = dict()
+    for i, w in top_words_set:
+        dic[w] = {
+            'positive_score': positive_scores[i],
+            'negative_score': negative_scores[i],
+            'prediction_score': diff[i],
+        }
+    print({words[i]: diff[i] for i in sort_idx_diff[-1:-num_of_top_words:-1]})
+    df = pd.DataFrame.from_dict(dic, orient='index')
+    #print(df.columns)
+    #df.to_csv('result.csv')
+    return df
+
+
+def main(txt, label, dim, xprotos, yprotos, rel, weight_type='abs', metric_type='geodesic', dic=None):
+    subspace, words, words_emb, word_imp_no_rot = get_subspace_of_doc(txt, dim)
+    plus, minus = get_winner_prototypes(subspace, label, xprotos, yprotos, rel, metric_type)
+
+    if plus['distance'] > minus['distance']:
+        t = 'misclassified'
+    else:
+        t = 'correct'
+
+#    print(
+#        f"""\n\t\t{t}: \t  {plus['distance']-minus['distance']}, 
+#        normalized:    {(plus['distance']-minus['distance'])/(plus['distance']+minus['distance'])}"""
+#    )
+
+    winners_type = ["positive", 'negative']
+    winners = [plus, minus]
+    word_importances_winners = []
+
+    for wtype, w in zip(winners_type, winners):
+        if dic is not None:
+            title = f"{wtype}: {dic[yprotos[w['index']]]}"
+        else:
+            title = f"{wtype}: {yprotos[w['index']]}"
+        print(title)
+	# CHECK: TODO: WHY  M should be word_imp_no_rot @ w['Q']
+        X, M = words_emb, word_imp_no_rot @ w['Q'] #NOTE: I have added @ w['Q'] today is 30 april 2024
+        W = X.T @ xprotos[w['index']] @ w['Qw']
+        if rel.shape[0] == 1:
+            txt_words_impact = rel * M * W
+        else:
+            txt_words_impact = np.expand_dims(rel[w['index']], axis=0) * M * W
+
+        if weight_type == 'abs':
+            txt_words_impact = np.abs(txt_words_impact)
+        #print('\n shape of txt_word_impact: ',txt_words_impact.shape )
+        word_importances_winners.append(txt_words_impact)
+
+        weights_sort_idx=np.argsort(txt_words_impact, axis=None)
+        txt_words_impact = txt_words_impact.flatten()
+        #print('\n shape of txt_word_impact.flatten(): ',txt_words_impact.shape )
+
+        tmp = {words[i // subspace.shape[-1]]: txt_words_impact[i] for i in weights_sort_idx[-1:-num_of_words_text:-1]}       
+        if wtype=="positive":
+            df_pos=pd.DataFrame.from_dict(tmp, orient='index').reset_index() 
+            df_pos.rename(columns={'index':'Words', 0: dic[yprotos[plus['index']]]}, inplace=True)
+        #    print('Shape and type of word_importances_winner[0]: ',
+        #            np.shape(word_importances_winners[0]), type(word_importances_winners))
+        else: 
+            df_neg=pd.DataFrame.from_dict(tmp, orient='index').reset_index()
+            df_neg.rename(columns={'index':'Words', 0: dic[yprotos[minus['index']]]}, inplace=True)
+       #     print('Shape and type of word_importances_winner[1]: ', 
+       #             np.shape(word_importances_winners[1]), type(word_importances_winners))
+      #  print(f"text : {tmp}")
+      #  print('Length of tmp=%d'%(len(tmp)))
+
+
+        plot_word_cloud(
+            tmp,
+            # topn=num_of_words_text,
+            title=title,
+            fname="_text_%s_%s_global_%d" % (dataname, wtype, num_of_words_text),
+            background_color='white'  # 'lightgrey'
+        )
+#    yprotos[minus['index']]
+    word_importance_diff = word_importances_winners[0] - word_importances_winners[1]
+    # word_importance_diff = np.abs(word_importances_winners[0]) - np.abs(word_importances_winners[1])
+    sort_idx = np.argsort(word_importance_diff, axis=None)
+    words_impacts = word_importance_diff.flatten()
+  #  print('\n subspace shape and type:',subspace.shape, type(subspace) )
+    tmp = {words[i // subspace.shape[-1]]: words_impacts[i] for i in sort_idx[-1:-num_of_words_text:-1]}
+   # print('\n tmp_diff: len and content: ',len(tmp), tmp)
+#    print('\n word diff: ', word_importance_diff)
+#    print('\n word_imp_win[0]: ', word_importances_winners[0])
+#    print('\n word_imp_win[1]: ',word_importances_winners[1])
+#    word_imp_pos=np.sort(word_importances_winners[0], axis=None)
+#    word_imp_neg=np.sort(word_importances_winners[1], axis=None)
+#    word_imp_pos=word_imp_pos.flatten()
+#    word_imp_neg=word_imp_neg.flatten()
+
+#    tmp_pos = {words[i // subspace.shape[-1]]: word_imp_pos[i] for i in sort_idx[-1:-num_of_words_text:-1]}
+#    tmp_neg = {words[i // subspace.shape[-1]]: word_imp_neg[i] for i in sort_idx[-1:-num_of_words_text:-1]}
+#    df_word_pos=pd.DataFrame.from_dict(tmp_pos, orient='index').reset_index() #, columns=['Terms','PosImpact'])
+#    df_word_neg=pd.DataFrame.from_dict(tmp_neg, orient='index').reset_index()#, columns=['Terms','NegImpact'])
+#    df_word_pos.rename(columns={'index':'Words', 0: 'Positive'}, inplace=True)
+#    df_word_neg.rename(columns={'index':'Words', 0: 'Negative'}, inplace=True)
+#    print(f"diff : {tmp_diff}")
+    df_pos.sort_values(by='Words', ascending=False, inplace=True)
+    df_neg.sort_values(by='Words', ascending=False, inplace=True)
+    df_net = pd.DataFrame.from_dict(tmp, orient='index').reset_index()
+    df_net.rename(columns={'index':'Words', 0:'Net'}, inplace=True)
+    print(df_net.columns)
+    df_net.sort_values(by='Words', ascending=False, inplace=True)
+    df_all={'pos':df_pos,'neg': df_neg, 'net': df_net}
+#    imp_all=pd.merge(df_word_pos, df_word_neg, on='Words', how='outer')
+#    imp_all=pd.merge(imp_all, df_word_net, on='Words', how='outer')
+#    imp_all.sort_values(by='Net', inplace=True)
+    plot_word_cloud(
+        tmp,
+        # topn=num_of_words_text,
+         title='net impact',#'differences',
+        fname="_text_%s_global_diff_%i_%d" % (dataname, idx, num_of_words_text),
+        background_color='white'  # 'lightgrey'
+    )
+
+    # tmp = {words[i // subspace.shape[-1]]: txt_words_impact[i] for i in weights_sort_idx[-1:-num_of_words_text:-1]}
+    # print(f"text : {tmp}")
+#    imp_dict=pd.DataFrame.from_dict(tmp, orient='columns')
+#    imp_dict=imp_dict.T
+#    print(imp_dict.columns)
+#    imp_dict.rename(columns={'Unnamed: 0':'Word', '0':'Importance'}, inplace=True) 
+#    print(imp_dict.head(3), '\n', type(imp_dict['Importance']))
+#    imp_dict['NormImportance']=imp_dict['Importance']/imp_dict['Importance'].sum()
+#    print("relevance:", rel)
+#    imp_dict.plot.bar(x='Word', y='Importance', figsize=(5,2))
+    return tmp, df_all, dic[yprotos[minus['index']]]#, imp_dict
+
+# TODO: write a code that compute closest words to the subspaces generated by
+#  prototypes (for prototypes' interpretations')
+data_opts={'1': 'reuters-8' ,'2':'newsgroups20','3': 'arxiv-4','4':'housing', '5': 'hyperpartisan'}
+print('\nChoices of dataset are:\n', data_opts)
+opt=int(input('\nEnter the number corresponding to the dataset you selected: [default is 5]') or '5')
+dataname =data_opts[str(opt)] # 'hyperpartisan' # 'reuters-8' , 'newsgroups20', 'arxiv-4', 'housing', hyperpartisan
+# fname = "../model/%s/glove/model_d20_ps" % dataname
+# fname = "../model/eviction/eviction_model_d30_ps"
+# fname = "../model/%s/glove/%s_model_d20_ps" % (dataname, dataname)
+# fname = "../model/%s/transformer/model_d20_ge" % (dataname)
+if dataname=='hyperpartisan':
+    fname = "../model/%s/glove/%s_model_d30_ps_92.31"%(dataname, dataname)
+else:
+    fname = "../model/%s/glove/%s_model_d20_ps"%(dataname, dataname)
+
+num_of_words_text=int(input('Enter the search area (no. of top words to show): [default is 20] ') or '20')# 100 # number of top words to sho
+# data_name = '../data/%s-test.csv' % dataname # reuters-8
+# data_name = '../data/Long-Document/longdocs4class.csv'
+# data_name = '../data/housing/both_annotations_with_texts.csv'
+data_name = '../data/%s/%s-test.csv' % (dataname, dataname) #imdb
+
+weight_type = 'nonabs', # 'abs' or 'nonabs'
+
+# misclassified: 
+# misclassified: (reutrers) cls=1, idx=1,      idx=0, cls=4
+#print('Loading a text')
+#txt, label = get_example_txt(
+#    idx=idx, cls=cls,
+    # label_col='Housing',# Housing, Exit
+#    fname=data_name
+#)
+#print(txt, "\n")
+#print(f"There are {len(txt.split())} tokens. \n")
+
+print('%s contains these classes:'%dataname)
+
+if dataname == 'reuters-8':
+    dic = {
+        'acq':0, 'crude': 1, 'earn': 2, 'grain': 3,
+        'interest': 4, 'money-fx': 5, 'ship': 6, 'trade': 7
+    }
+    
+elif dataname == 'newsgroups20':
+    dic = {
+        'alt.atheism': 0, 'comp.graphics': 1,
+        'comp.os.ms-windows.misc': 2,
+        'comp.sys.ibm.pc.hardware': 3,
+        'comp.sys.mac.hardware': 4, 'comp.windows.x': 5,
+        'misc.forsale': 6, 'rec.autos': 7,
+        'rec.motorcycles': 8, 'rec.sport.baseball': 9,
+        'rec.sport.hockey': 10, 'sci.crypt': 11,
+        'sci.electronics': 12, 'sci.med': 13, 'sci.space': 14,
+        'soc.religion.christian': 15, 'talk.politics.guns': 16,
+        'talk.politics.mideast': 17, 'talk.politics.misc': 18,
+        'talk.religion.misc': 19
+    }
+elif dataname == 'arxiv-4':
+    dic = {'cs.IT': 0, 'cs.NE': 1, 'math.AC': 2, 'math.GR': 3}
+      
+elif dataname == 'arxiv-11':
+    dic = {
+    'cs.AI': 0, 'cs.CE': 1, 'cs.CV': 2, 'cs.DS': 3,
+    'cs.IT': 4, 'cs.NE': 5, 'cs.PL': 6, 'cs.SY': 7,
+    'math.AC': 8, 'math.GR': 9, 'math.ST': 10
+    }
+    print(dic.keys())
+    
+elif dataname == 'housing':
+    dic = {
+        'housing': 1,
+        'non-housing': 0,
+    }   
+    
+elif dataname=='hyperpartisan':
+    dic={'true': 1, 'false': 0}
+   
+else:
+    dic = None
+
+if dic is not None:
+    dic = {v: k for k, v in dic.items()}
+
+print(dic)
+cls=int(input('\n Enter a class of your choice [default cls 1]: ').strip() or '1')
+
+# dic[cls_name]
+idx=int(input('\n Enter an index of your choice [default idx=0]: ') or '0')
+#idx = 0
+
+print('Loading a text')
+txt, label = get_example_txt(
+    idx=idx, cls=cls,
+    # label_col='Housing',# Housing, Exit
+    fname=data_name
+)
+
+#print(txt, "\n")
+print(f"There are {len(txt.split())} tokens. \n")
+
+
+print("Loading the GRLGQ model!")
+xprotos, yprotos, rel = return_model(fname)
+dim = xprotos.shape[-1]
+D = xprotos.shape[-2]
+
+print("Loading the word embedding model!")
+if D == 100:
+    checkpoint = 'glove.6B.100d', #'word2vec-google-news-300', 'glove.6B.100d'
+elif D == 300:
+    checkpoint = 'glove.42B.300d'# 'word2vec-google-news-300'
+else:
+    print("give a model")
+    checkpoint = None
+
+MODEL = load_model_gensim(
+    checkpoint=checkpoint
+)
+
+
+#weights, df_all, neg_cls = main(txt, label, dim, xprotos, yprotos, rel, weight_type='nonabs', metric_type='pseudo-chordal', dic=dic)
+pos_score, neg_score, words, mistaken_cls = get_word_importances(txt, label, dim, xprotos, yprotos, rel, weight_type=weight_type, metric_type='pseudo-chordal', dic=dic)
+df=get_top_words(words, pos_score, neg_score, num_of_words_text)
+#print(df_word_pos.columns)
+#df = pd.DataFrame.from_dict(weights, orient='index').reset_index()#, columns=['Terms','Relevance'])
+#df.rename(columns={'index':'Words', 0:'NetImpact'}, inplace=True)
+#print(df.columns)# yprotos[minus['index']]
+#df_pos, df_neg, df_net=df_all['pos'], df_all['neg'], df_all['net']
+#print(df_pos.columns, '\n', df_neg.columns, '\n', df_net.columns)
+#df=df.T
+current_path=os.getcwd()
+if current_path.split(os.sep)[-1]=='codes':
+    filepath='../results_csv/'
+else:
+    filepath='~/ProjectsPy/PyCharm/codetoshare/results_csv/'
+
+p_cls_name, n_cls_name=dic[cls], dic[mistaken_cls]
+print('correct and incorrect class names', p_cls_name, n_cls_name)
+df.rename(columns={'positive_score': 'impact-'+p_cls_name.upper(),  
+                   'negative_score': 'impact-'+n_cls_name.upper(),
+                   'prediction_score': 'impact-Net'}, inplace=True)
+#df.rename(columns={'Negative': 'Negative-'+neg_cls}, inplace=True)
+#df.sort_values(by='Words', ascending=False, inplace=True)
+#df_pos.sort_values(by='Words', ascending=False, inplace=True)
+#imp_neg.sort_values(by='Words', ascending=False, inplace=True)
+##imp_all=imp_net
+#imp_all=pd.merge(imp_net, imp_pos, on='Words')
+#imp_all=pd.merge(imp_all, imp_neg, on='Words')
+
+saveFlag=int(input('Save as csv? 0: no, 1: yes'))
+if saveFlag==1:
+    df.to_csv(filepath+'%s_top%d_words_cls%d_idx%d.csv'%(dataname,num_of_words_text, cls, idx), sep=',',)
+#df_net.to_csv(filepath+'%s_impact_top%d_words_cls%d_idx%d_net.csv'%(dataname,num_of_words_text, cls, idx), sep=',', index=False)
+#df_pos.to_csv(filepath+'%s_impact_top%d_words_cls%d_idx%d_pos.csv'%(dataname,num_of_words_text, cls, idx), sep=',', index=False)
+#df_neg.to_csv(filepath+'%s_impact_top%d_words_cls%d_idx%d_neg.csv'%(dataname,num_of_words_text, cls, idx), sep=',', index=False)
